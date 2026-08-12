@@ -28,11 +28,48 @@ function trusted_proxies(): array {
     return TRUST_PROXY ? ['*'] : [];
 }
 
+// Cek apakah IP berada dalam satu CIDR (mis. 192.168.0.0/16).
+function ip_in_cidr(string $ip, string $cidr): bool {
+    [$subnet, $bits] = array_pad(explode('/', $cidr, 2), 2, null);
+    $ip_long = ip2long($ip);
+    if ($bits === null) {
+        return $ip_long !== false && $ip_long === ip2long($subnet);
+    }
+    $subnet_long = ip2long($subnet);
+    $bits = (int) $bits;
+    if ($ip_long === false || $subnet_long === false || $bits < 0 || $bits > 32) {
+        return false;
+    }
+    $mask = $bits === 0 ? 0 : (-1 << (32 - $bits));
+    return ($ip_long & $mask) === ($subnet_long & $mask);
+}
+
+function is_trusted_proxy(string $ip): bool {
+    foreach (trusted_proxies() as $entry) {
+        if ($entry === '*') {
+            return true;
+        }
+        if (str_contains($entry, '/')) {
+            if (ip_in_cidr($ip, $entry)) {
+                return true;
+            }
+        } elseif ($ip === $entry) {
+            return true;
+        }
+    }
+    return false;
+}
+
 const ADMIN_USER = 'admin';
 const ADMIN_PASSWORD_ENV = 'ADMIN_PASSWORD'; // env, fallback 'ipcheck'
 
 const LOG_FILE = __DIR__ . '/visitor_log.txt';
 const DATA_FILE = __DIR__ . '/visitor_data.jsonl';
+// Detail komputer & GeoIP disimpan terpisah (append-only), supaya track.php
+// tidak perlu menulis ulang seluruh data utama tiap kunjungan.
+const DETAILS_FILE = __DIR__ . '/visitor_details.jsonl';
+// Cache hitungan kunjungan per IP (dipakai untuk is_new di build_visit_data).
+const IP_SEEN_FILE = __DIR__ . '/visitor_ip_seen.json';
 
 // Rotasi otomatis: kalau visitor_data.jsonl melebihi batas (byte),
 // data dipotong menyisakan LOG_KEEP_LINES baris terakhir.
@@ -77,8 +114,7 @@ function is_admin(): bool {
 
 function get_visitor_ip(): string {
     $remote = $_SERVER['REMOTE_ADDR'] ?? 'UNKNOWN';
-    $trusted = trusted_proxies();
-    $is_trusted = in_array('*', $trusted, true) || in_array($remote, $trusted, true);
+    $is_trusted = is_trusted_proxy($remote);
     if ($is_trusted) {
         // X-Forwarded-For: IP client asli ditambahkan oleh proxy paling luar
         // (mis. NPM), lalu proxy dalam (nginx web) menambahkan IP-nya sendiri
@@ -211,32 +247,104 @@ function load_data(): array {
             }
         }
     }
+    // Gabungkan detail komputer & GeoIP (append-only, yang terakhir menang).
+    if (is_readable(DETAILS_FILE)) {
+        foreach (file(DETAILS_FILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            $detail = json_decode($line, true);
+            $vid = $detail['visit_id'] ?? null;
+            if (is_array($detail) && $vid && isset($rows[$vid])) {
+                $rows[$vid] = array_merge($rows[$vid], $detail);
+            }
+        }
+    }
     return $rows;
 }
 
+function ip_seen(): array {
+    static $cache = null;
+    if ($cache === null) {
+        $cache = is_readable(IP_SEEN_FILE)
+            ? (json_decode((string) file_get_contents(IP_SEEN_FILE), true) ?: [])
+            : [];
+    }
+    return $cache;
+}
+
 function ip_visit_count(string $ip): int {
-    if ($ip === 'UNKNOWN' || !is_readable(DATA_FILE)) {
+    if ($ip === 'UNKNOWN') {
         return 0;
     }
-    $needle = '"ip":"' . addcslashes($ip, '"\\') . '"';
-    return substr_count(file_get_contents(DATA_FILE), $needle);
+    return (int) (ip_seen()[$ip] ?? 0);
+}
+
+function ip_seen_bump(string $ip): void {
+    if ($ip === 'UNKNOWN') {
+        return;
+    }
+    $seen = ip_seen();
+    $seen[$ip] = ($seen[$ip] ?? 0) + 1;
+    file_put_contents(IP_SEEN_FILE, json_encode($seen), LOCK_EX);
+}
+
+function ip_seen_rebuild(): void {
+    $counts = [];
+    if (is_readable(DATA_FILE)) {
+        foreach (file(DATA_FILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            $entry = json_decode($line, true);
+            if (is_array($entry) && !empty($entry['ip'])) {
+                $counts[$entry['ip']] = ($counts[$entry['ip']] ?? 0) + 1;
+            }
+        }
+    }
+    file_put_contents(IP_SEEN_FILE, json_encode($counts), LOCK_EX);
+}
+
+// Baca beberapa baris terakhir file besar tanpa membaca seluruh isinya.
+function tail_lines(string $file, int $count = 100): array {
+    if (!is_readable($file)) {
+        return [];
+    }
+    $fh = fopen($file, 'rb');
+    if ($fh === false) {
+        return [];
+    }
+    $size = filesize($file);
+    $buf = '';
+    $pos = $size;
+    while ($pos > 0) {
+        $len = min(4096, $pos);
+        $pos -= $len;
+        fseek($fh, $pos);
+        $buf = fread($fh, $len) . $buf;
+        if (substr_count($buf, "\n") >= $count) {
+            break;
+        }
+    }
+    fclose($fh);
+    $lines = preg_split('/\R/', trim($buf));
+    return array_slice($lines, -$count);
 }
 
 function log_visitor(array $data): void {
     $line = "[{$data['time']}] IP: {$data['ip']} | UA: {$data['ua']}" . PHP_EOL;
     file_put_contents(LOG_FILE, $line, FILE_APPEND | LOCK_EX);
     file_put_contents(DATA_FILE, json_encode($data) . PHP_EOL, FILE_APPEND | LOCK_EX);
+    ip_seen_bump($data['ip']);
     maybe_rotate();
 }
 
 function maybe_rotate(): void {
-    if (!file_exists(DATA_FILE) || filesize(DATA_FILE) < LOG_MAX_BYTES) {
-        return;
-    }
-    $data_lines = file(DATA_FILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    if (count($data_lines) > LOG_KEEP_LINES) {
-        $keep = array_slice($data_lines, -LOG_KEEP_LINES);
-        file_put_contents(DATA_FILE, implode(PHP_EOL, $keep) . PHP_EOL, LOCK_EX);
+    $rotated = false;
+    foreach ([DATA_FILE, DETAILS_FILE] as $file) {
+        if (!file_exists($file) || filesize($file) < LOG_MAX_BYTES) {
+            continue;
+        }
+        $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if (count($lines) > LOG_KEEP_LINES) {
+            $keep = array_slice($lines, -LOG_KEEP_LINES);
+            file_put_contents($file, implode(PHP_EOL, $keep) . PHP_EOL, LOCK_EX);
+            $rotated = true;
+        }
     }
     if (is_readable(LOG_FILE) && filesize(LOG_FILE) > LOG_MAX_BYTES) {
         $txt_lines = file(LOG_FILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -244,5 +352,8 @@ function maybe_rotate(): void {
             $keep = array_slice($txt_lines, -LOG_KEEP_LINES);
             file_put_contents(LOG_FILE, implode(PHP_EOL, $keep) . PHP_EOL, LOCK_EX);
         }
+    }
+    if ($rotated) {
+        ip_seen_rebuild();
     }
 }

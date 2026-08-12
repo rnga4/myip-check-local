@@ -116,6 +116,76 @@ if ($range !== 'all') {
 
 $total_all = count($all_visitors);
 
+// Export data (CSV/JSON) dari hasil filter saat ini
+$export = (string) ($_GET['export'] ?? '');
+if ($export === 'csv' || $export === 'json') {
+    $export_rows = [];
+    foreach ($all_visitors as $v) {
+        $v = array_merge([
+            'screen' => '-', 'lang' => '-', 'tz' => '-', 'cores' => '-',
+            'memory' => '-', 'platform' => '-', 'touch' => '-',
+        ], $v);
+        $geo_text = '';
+        if (!empty($v['geo']) && is_array($v['geo'])) {
+            $geo_text = implode(', ', array_filter($v['geo']));
+        }
+        $export_rows[] = [
+            'waktu'      => (string) ($v['time'] ?? ''),
+            'ip'         => (string) ($v['ip'] ?? ''),
+            'hostname'   => (string) ($v['hostname'] ?? ''),
+            'lokasi'     => $geo_text,
+            'os'         => (string) ($v['os'] ?? ''),
+            'browser'    => (string) ($v['browser'] ?? ''),
+            'device'     => (string) ($v['device'] ?? ''),
+            'screen'     => (string) ($v['screen'] ?? ''),
+            'lang'       => (string) ($v['lang'] ?? ''),
+            'tz'         => (string) ($v['tz'] ?? ''),
+            'cores'      => (string) ($v['cores'] ?? ''),
+            'memory'     => (string) ($v['memory'] ?? ''),
+            'platform'   => (string) ($v['platform'] ?? ''),
+            'touch'      => (string) ($v['touch'] ?? ''),
+            'user_agent' => (string) ($v['ua'] ?? ''),
+            'status'     => !empty($v['is_new']) ? 'baru' : 'kembali',
+        ];
+    }
+    $stamp = date('Ymd-His');
+    if ($export === 'json') {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="visitors-' . $stamp . '.json"');
+        echo json_encode(array_values($export_rows), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    } else {
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="visitors-' . $stamp . '.csv"');
+        $out = fopen('php://output', 'w');
+        fwrite($out, "\xEF\xBB\xBF"); // BOM supaya Excel membaca UTF-8 dengan benar
+        if ($export_rows) {
+            fputcsv($out, array_keys($export_rows[0]));
+            foreach ($export_rows as $row) {
+                fputcsv($out, $row);
+            }
+        }
+        fclose($out);
+    }
+    exit;
+}
+
+// Grafik kunjungan per hari dari data yang sedang difilter
+$days = $range === 'today' ? 1 : ($range === '7' ? 7 : 30);
+$daily = [];
+for ($i = $days - 1; $i >= 0; $i--) {
+    $daily[date('Y-m-d', strtotime("-{$i} days"))] = 0;
+}
+foreach ($all_visitors as $v) {
+    $t = strtotime((string) ($v['time'] ?? ''));
+    if ($t !== false) {
+        $day = date('Y-m-d', $t);
+        if (isset($daily[$day])) {
+            $daily[$day]++;
+        }
+    }
+}
+$max_daily = max(1, max($daily));
+
 $per_page = 50;
 $page = max(1, (int) ($_GET['page'] ?? 1));
 $pages = (int) ceil($total_all / $per_page);
@@ -170,6 +240,14 @@ foreach ($all_visitors as $v) {
   .range-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .range-lbl { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted-foreground); }
   .range-filter .btn-sm.active { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+  .warn-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: color-mix(in oklch, var(--destructive) 12%, transparent); border: 1px solid color-mix(in oklch, var(--destructive) 40%, transparent); color: oklch(0.42 0.16 25); border-radius: var(--radius-lg); padding: 10px 16px; margin-bottom: 22px; font-size: 0.9rem; }
+  .warn-banner b { font-weight: 700; }
+  .chart { display: flex; align-items: flex-end; gap: 3px; height: 130px; padding-top: 8px; }
+  .chart-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; min-width: 0; }
+  .chart-bar { width: 100%; max-width: 28px; min-height: 2px; background: linear-gradient(180deg, var(--primary), color-mix(in oklch, var(--primary) 60%, transparent)); border-radius: 4px 4px 0 0; transition: height 0.2s ease; }
+  .chart-col:hover .chart-bar { filter: brightness(1.15); }
+  .chart-lbl { font-size: 0.62rem; color: var(--muted-foreground); margin-top: 5px; white-space: nowrap; overflow: hidden; }
+  .chart-val { font-size: 0.62rem; font-weight: 700; color: var(--muted-foreground); margin-bottom: 3px; }
   @media (max-width: 768px) {
     body { justify-content: flex-start; padding-top: 56px; }
     .container-input { width: 100%; }
@@ -213,10 +291,31 @@ foreach ($all_visitors as $v) {
       </div>
     </header>
 
+    <?php if (admin_password() === 'ipcheck'): ?>
+      <div class="warn-banner">
+        <b>Peringatan:</b> kamu masih memakai password admin bawaan (default). Ganti
+        <code>ADMIN_PASSWORD</code> di <code>.env</code> lalu
+        <code>docker compose up -d app</code>.
+      </div>
+    <?php endif; ?>
+
     <div class="stat-grid">
       <div class="stat"><div class="stat-val"><?= $total_all ?></div><div class="stat-lbl">Total kunjungan</div></div>
       <div class="stat"><div class="stat-val"><?= count($ip_counts) ?></div><div class="stat-lbl">IP unik</div></div>
       <div class="stat"><div class="stat-val"><?= $total_screen ?></div><div class="stat-lbl">Detail komputer</div></div>
+    </div>
+
+    <h2 class="sub-section-label">Kunjungan per hari</h2>
+    <div class="card">
+      <div class="chart">
+        <?php foreach ($daily as $day => $count): ?>
+          <div class="chart-col" title="<?= htmlspecialchars($day) ?>: <?= $count ?> kunjungan">
+            <div class="chart-val"><?= $count > 0 ? $count : '' ?></div>
+            <div class="chart-bar" style="height: <?= round($count / $max_daily * 100) ?>%"></div>
+            <div class="chart-lbl"><?= date('j M', strtotime($day)) ?></div>
+          </div>
+        <?php endforeach; ?>
+      </div>
     </div>
 
     <div class="toolbar">
@@ -226,6 +325,12 @@ foreach ($all_visitors as $v) {
         </div>
         <button type="submit" class="btn-sm">Cari</button>
         <?php if ($q !== ''): ?><a class="btn-sm" href="admin.php">Reset</a><?php endif; ?>
+      </form>
+      <form method="get" action="admin.php">
+        <?php if ($q !== ''): ?><input type="hidden" name="q" value="<?= htmlspecialchars($q) ?>"><?php endif; ?>
+        <?php if ($range !== 'all'): ?><input type="hidden" name="range" value="<?= htmlspecialchars($range) ?>"><?php endif; ?>
+        <button type="submit" name="export" value="csv" class="btn-sm">Export CSV</button>
+        <button type="submit" name="export" value="json" class="btn-sm">Export JSON</button>
       </form>
       <form method="post" action="admin.php" onsubmit="return confirm('Yakin mau hapus semua data visitor?')">
         <input type="hidden" name="action" value="clear">

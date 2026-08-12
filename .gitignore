@@ -1,3 +1,5 @@
 .env
 visitor_data.jsonl
 visitor_log.txt
+visitor_details.jsonl
+visitor_ip_seen.json

@@ -21,8 +21,16 @@ services:
       - ./theme.js:/app/theme.js:ro
       - ./visitor_log.txt:/app/visitor_log.txt
       - ./visitor_data.jsonl:/app/visitor_data.jsonl
+      - ./visitor_details.jsonl:/app/visitor_details.jsonl
+      - ./visitor_ip_seen.json:/app/visitor_ip_seen.json
     expose:
       - "9000"
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@fsockopen('127.0.0.1', 9000) ? 0 : 1);"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   web:
     image: nginx:alpine
@@ -42,3 +50,9 @@ services:
       - ./theme.js:/app/theme.js:ro
     depends_on:
       - app
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
