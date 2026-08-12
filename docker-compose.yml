@@ -1,0 +1,44 @@
+services:
+  app:
+    build: .
+    container_name: ipcheck
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-ipcheck}
+      TRUST_PROXY: "true"
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Jakarta}
+      TZ: ${TZ:-Asia/Jakarta}
+    volumes:
+      - ./index.php:/app/index.php:ro
+      - ./admin.php:/app/admin.php:ro
+      - ./track.php:/app/track.php:ro
+      - ./api.php:/app/api.php:ro
+      - ./config.php:/app/config.php:ro
+      - ./theme-popup.php:/app/theme-popup.php:ro
+      - ./pl-komatsu-ui-template.css:/app/pl-komatsu-ui-template.css:ro
+      - ./theme.js:/app/theme.js:ro
+      - ./visitor_log.txt:/app/visitor_log.txt
+      - ./visitor_data.jsonl:/app/visitor_data.jsonl
+    expose:
+      - "9000"
+
+  web:
+    image: nginx:alpine
+    container_name: ipcheck-web
+    restart: unless-stopped
+    ports:
+      - "8090:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./index.php:/app/index.php:ro
+      - ./admin.php:/app/admin.php:ro
+      - ./track.php:/app/track.php:ro
+      - ./api.php:/app/api.php:ro
+      - ./config.php:/app/config.php:ro
+      - ./theme-popup.php:/app/theme-popup.php:ro
+      - ./pl-komatsu-ui-template.css:/app/pl-komatsu-ui-template.css:ro
+      - ./theme.js:/app/theme.js:ro
+    depends_on:
+      - app
