@@ -45,6 +45,10 @@ function ip_in_cidr(string $ip, string $cidr): bool {
 }
 
 function is_trusted_proxy(string $ip): bool {
+    // Loopback (127.x.x.x) tidak boleh dianggap trusted proxy — itu internal Docker, bukan proxy asli.
+    if (str_starts_with($ip, '127.')) {
+        return false;
+    }
     foreach (trusted_proxies() as $entry) {
         if ($entry === '*') {
             return true;
@@ -326,6 +330,10 @@ function tail_lines(string $file, int $count = 100): array {
 }
 
 function log_visitor(array $data): void {
+    // Skip loopback IP (127.x.x.x) — itu healthcheck/internal dari Docker, bukan visitor.
+    if (str_starts_with($data['ip'], '127.')) {
+        return;
+    }
     $line = "[{$data['time']}] IP: {$data['ip']} | UA: {$data['ua']}" . PHP_EOL;
     file_put_contents(LOG_FILE, $line, FILE_APPEND | LOCK_EX);
     file_put_contents(DATA_FILE, json_encode($data) . PHP_EOL, FILE_APPEND | LOCK_EX);
